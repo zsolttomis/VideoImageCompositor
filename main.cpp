@@ -39,7 +39,7 @@
 #include <unistd.h>
 #include <chrono>
 
-#include "nvToolsExt.h"
+#include "include/nvToolsExt.h"
 
 #define INPUT_WIDTH 1920
 #define INPUT_HEIGHT 1080
@@ -48,8 +48,6 @@
 #define OUTPUT_WIDTH 1280
 #define OUTPUT_HEIGHT 720
 #define OUTPUT_PIXFMT V4L2_PIX_FMT_NV12M
-
-#define BUF_TYPE_NVPL 0
 
 typedef struct
 {
@@ -66,6 +64,10 @@ typedef struct
     bool got_error;
 
     std::chrono::time_point<std::chrono::high_resolution_clock> begin;
+    nvtxRangeId_t rangeId;
+
+    uint32_t frameCounter;
+
 } context_t;
 
 
@@ -86,7 +88,9 @@ conv0_capture_dqbuf_thread_callback(struct v4l2_buffer *v4l2_buf,
 {
     context_t *ctx = (context_t *) arg;
 
-    std::cout << std::chrono::duration<double, std::micro>{std::chrono::high_resolution_clock::now() - ctx->begin}.count() << " us" << std::endl;
+    nvtxRangePop();
+    nvtxRangeEnd(ctx->rangeId);
+    std::cout << ++ctx->frameCounter << ": "<<  std::chrono::duration<double, std::micro>{std::chrono::high_resolution_clock::now() - ctx->begin}.count() << " us" << std::endl;
 
     if (!v4l2_buf)
     {
@@ -103,6 +107,8 @@ conv0_capture_dqbuf_thread_callback(struct v4l2_buffer *v4l2_buf,
     write_video_frame(ctx->out_file, *buffer);
 
     ctx->begin = std::chrono::high_resolution_clock::now();
+    ctx->rangeId = nvtxRangeStart("Tomis");
+    nvtxRangePush("cucc");
 
     if (ctx->conv0->capture_plane.qBuffer(*v4l2_buf, buffer) < 0)
     {
@@ -118,14 +124,13 @@ conv0_capture_dqbuf_thread_callback(struct v4l2_buffer *v4l2_buf,
 int
 main(int argc, char *argv[])
 {
-
-    nvtxRangePush("cucc");
-
     context_t ctx;
     NvVideoConverter *main_conv;
     int ret = 0;
     int error = 0;
     bool eos = false;
+
+    ctx.frameCounter = 0;
 
     ctx.in_file = new ifstream("in");
 
@@ -134,12 +139,6 @@ main(int argc, char *argv[])
     ctx.conv0 = NvVideoConverter::createVideoConverter("conv0");
 
     main_conv = ctx.conv0;
-
-    ret = main_conv->setFlipMethod(V4L2_FLIP_METHOD_IDENTITY);
-
-    ret = main_conv->setInterpolationMethod(V4L2_INTERPOLATION_NEAREST);
-
-    ret = main_conv->setTnrAlgorithm(V4L2_TNR_ALGO_ORIGINAL);
 
     ret = ctx.conv0->setOutputPlaneFormat(INPUT_PIXFMT, INPUT_WIDTH, INPUT_HEIGHT, V4L2_NV_BUFFER_LAYOUT_PITCH);
 
@@ -267,7 +266,8 @@ cleanup:
         cout << "App run was successful" << endl;
     }
 
-    nvtxRangePop();
+
+
 
     return -error;
 }
