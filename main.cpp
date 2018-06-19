@@ -39,6 +39,8 @@
 #include <unistd.h>
 #include <chrono>
 
+#include "nvToolsExt.h"
+
 #define INPUT_WIDTH 1920
 #define INPUT_HEIGHT 1080
 #define INPUT_PIXFMT V4L2_PIX_FMT_YUV420M
@@ -116,6 +118,9 @@ conv0_capture_dqbuf_thread_callback(struct v4l2_buffer *v4l2_buf,
 int
 main(int argc, char *argv[])
 {
+
+    nvtxRangePush("cucc");
+
     context_t ctx;
     NvVideoConverter *main_conv;
     int ret = 0;
@@ -261,5 +266,8 @@ cleanup:
     {
         cout << "App run was successful" << endl;
     }
+
+    nvtxRangePop();
+
     return -error;
 }
