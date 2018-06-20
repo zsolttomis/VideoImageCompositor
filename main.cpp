@@ -41,11 +41,11 @@
 
 #include "include/nvToolsExt.h"
 
-#define INPUT_WIDTH 1920
+#define INPUT_WIDTH 3840
 #define INPUT_HEIGHT 1080
 #define INPUT_PIXFMT V4L2_PIX_FMT_YUV420M
 
-#define OUTPUT_WIDTH 1280
+#define OUTPUT_WIDTH 2560
 #define OUTPUT_HEIGHT 720
 #define OUTPUT_PIXFMT V4L2_PIX_FMT_NV12M
 
@@ -194,8 +194,6 @@ main(int argc, char *argv[])
         v4l2_buf.index = i;
         v4l2_buf.m.planes = planes;
 
-        ctx.in_file->seekg(ctx.in_file->tellg()+3060232,ctx.in_file->beg);
-
         if (read_video_frame(ctx.in_file, *buffer) < 0)
         {
             cerr << "Could not read complete frame from input file" << endl;
@@ -233,9 +231,7 @@ main(int argc, char *argv[])
         nvtxRangeEnd(rangeId);
         rangeId = nvtxRangeStart("RD Frame");
 
-        ctx.in_file->seekg(ctx.in_file->tellg()+3060232,ctx.in_file->beg);
-        if(ctx.in_file->tellg()> ctx.length)
-        //if (read_video_frame(ctx.in_file, *buffer) < 0)
+        if (read_video_frame(ctx.in_file, *buffer) < 0)
         {
             cerr << "Could not read complete frame from input file" << endl;
             cerr << "File read complete." << endl;
