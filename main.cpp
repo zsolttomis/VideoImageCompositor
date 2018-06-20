@@ -59,14 +59,13 @@ typedef struct
     char *out_file_path;
     std::ofstream * out_file;
 
-    pthread_cond_t queue_cond;
-
     bool got_error;
 
     std::chrono::time_point<std::chrono::high_resolution_clock> begin;
     nvtxRangeId_t rangeId;
 
     uint32_t frameCounter;
+    int length;
 
 } context_t;
 
@@ -78,7 +77,6 @@ abort(context_t * ctx)
 {
     ctx->got_error = true;
     ctx->conv0->abort();
-    pthread_cond_broadcast(&ctx->queue_cond);
 }
 
 static bool
@@ -104,10 +102,12 @@ conv0_capture_dqbuf_thread_callback(struct v4l2_buffer *v4l2_buf,
         return false;
     }
 
+    nvtxRangeId_t rangeId = nvtxRangeStart("WR Frame");
     write_video_frame(ctx->out_file, *buffer);
+    nvtxRangeEnd(rangeId);
 
     ctx->begin = std::chrono::high_resolution_clock::now();
-    ctx->rangeId = nvtxRangeStart("Tomis");
+    ctx->rangeId = nvtxRangeStart("VIC call");
     nvtxRangePush("cucc");
 
     if (ctx->conv0->capture_plane.qBuffer(*v4l2_buf, buffer) < 0)
@@ -119,6 +119,9 @@ conv0_capture_dqbuf_thread_callback(struct v4l2_buffer *v4l2_buf,
 
     return true;
 }
+
+
+
 
 
 int
@@ -135,6 +138,13 @@ main(int argc, char *argv[])
     ctx.in_file = new ifstream("in");
 
     ctx.out_file = new ofstream("out");
+
+    ctx.in_file->seekg(0, ctx.in_file->end);
+    std::cout << "Ifstream size:" << ctx.in_file->tellg() << std::endl;
+    ctx.length = ctx.in_file->tellg();
+    ctx.in_file->seekg(0,ctx.in_file->beg);
+
+
 
     ctx.conv0 = NvVideoConverter::createVideoConverter("conv0");
 
@@ -184,6 +194,8 @@ main(int argc, char *argv[])
         v4l2_buf.index = i;
         v4l2_buf.m.planes = planes;
 
+        ctx.in_file->seekg(ctx.in_file->tellg()+3060232,ctx.in_file->beg);
+
         if (read_video_frame(ctx.in_file, *buffer) < 0)
         {
             cerr << "Could not read complete frame from input file" << endl;
@@ -210,6 +222,7 @@ main(int argc, char *argv[])
 
         v4l2_buf.m.planes = planes;
 
+        nvtxRangeId_t rangeId = nvtxRangeStart("Output Plane DQ buffer");
         if (ctx.conv0->output_plane.dqBuffer(v4l2_buf, &buffer, NULL, 100) < 0)
         {
             cerr << "ERROR while DQing buffer at conv0 output plane" << endl;
@@ -217,15 +230,22 @@ main(int argc, char *argv[])
             goto cleanup;
         }
 
-        if (read_video_frame(ctx.in_file, *buffer) < 0)
+        nvtxRangeEnd(rangeId);
+        rangeId = nvtxRangeStart("RD Frame");
+
+        ctx.in_file->seekg(ctx.in_file->tellg()+3060232,ctx.in_file->beg);
+        if(ctx.in_file->tellg()> ctx.length)
+        //if (read_video_frame(ctx.in_file, *buffer) < 0)
         {
             cerr << "Could not read complete frame from input file" << endl;
             cerr << "File read complete." << endl;
             v4l2_buf.m.planes[0].bytesused = 0;
             eos = true;
         }
+        nvtxRangeEnd(rangeId);
 
         //ctx.begin = std::chrono::high_resolution_clock::now();
+        rangeId = nvtxRangeStart("Output Plane Q buffer");
         ret = ctx.conv0->output_plane.qBuffer(v4l2_buf, NULL);
         if (ret < 0)
         {
@@ -233,6 +253,7 @@ main(int argc, char *argv[])
             abort(&ctx);
             goto cleanup;
         }
+        nvtxRangeEnd(rangeId);
     }
 
     if (!ctx.got_error)
