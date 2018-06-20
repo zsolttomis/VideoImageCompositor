@@ -86,7 +86,6 @@ conv0_capture_dqbuf_thread_callback(struct v4l2_buffer *v4l2_buf,
 {
     context_t *ctx = (context_t *) arg;
 
-    nvtxRangePop();
     nvtxRangeEnd(ctx->rangeId);
     std::cout << ++ctx->frameCounter << ": "<<  std::chrono::duration<double, std::micro>{std::chrono::high_resolution_clock::now() - ctx->begin}.count() << " us" << std::endl;
 
@@ -102,13 +101,31 @@ conv0_capture_dqbuf_thread_callback(struct v4l2_buffer *v4l2_buf,
         return false;
     }
 
-    nvtxRangeId_t rangeId = nvtxRangeStart("WR Frame");
+    nvtxEventAttributes_t WriteFrame = {0};
+
+    WriteFrame.version = NVTX_VERSION;
+    WriteFrame.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+    WriteFrame.colorType = NVTX_COLOR_ARGB;
+    WriteFrame.color = 0xFFFF0000;
+    WriteFrame.messageType = NVTX_MESSAGE_TYPE_ASCII;
+    WriteFrame.message.ascii = "Write Frame";
+
+    nvtxRangeId_t rangeId = nvtxRangeStartEx(&WriteFrame);
+
     write_video_frame(ctx->out_file, *buffer);
     nvtxRangeEnd(rangeId);
 
     ctx->begin = std::chrono::high_resolution_clock::now();
-    ctx->rangeId = nvtxRangeStart("VIC call");
-    nvtxRangePush("cucc");
+
+    nvtxEventAttributes_t Q_CapturePlane = {0};
+    Q_CapturePlane.version = NVTX_VERSION;
+    Q_CapturePlane.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+    Q_CapturePlane.colorType = NVTX_COLOR_ARGB;
+    Q_CapturePlane.color = 0xFF00FF00;
+    Q_CapturePlane.messageType = NVTX_MESSAGE_TYPE_ASCII;
+    Q_CapturePlane.message.ascii = "Queue Capture plane";
+
+    rangeId = nvtxRangeStartEx(&Q_CapturePlane);
 
     if (ctx->conv0->capture_plane.qBuffer(*v4l2_buf, buffer) < 0)
     {
@@ -117,15 +134,22 @@ conv0_capture_dqbuf_thread_callback(struct v4l2_buffer *v4l2_buf,
         return false;
     }
 
+    nvtxRangeEnd(rangeId);
+
+    nvtxEventAttributes_t DQ_CapturePlane = {0};
+    DQ_CapturePlane.version = NVTX_VERSION;
+    DQ_CapturePlane.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+    DQ_CapturePlane.colorType = NVTX_COLOR_ARGB;
+    DQ_CapturePlane.color = 0xFF00FFFF;
+    DQ_CapturePlane.messageType = NVTX_MESSAGE_TYPE_ASCII;
+    DQ_CapturePlane.message.ascii = "DeQueue Capture plane";
+
+    ctx->rangeId = nvtxRangeStartEx(&DQ_CapturePlane);
+
     return true;
 }
 
-
-
-
-
-int
-main(int argc, char *argv[])
+int main(int argc, char *argv[])
 {
     context_t ctx;
     NvVideoConverter *main_conv;
@@ -138,13 +162,6 @@ main(int argc, char *argv[])
     ctx.in_file = new ifstream("in");
 
     ctx.out_file = new ofstream("out");
-
-    ctx.in_file->seekg(0, ctx.in_file->end);
-    std::cout << "Ifstream size:" << ctx.in_file->tellg() << std::endl;
-    ctx.length = ctx.in_file->tellg();
-    ctx.in_file->seekg(0,ctx.in_file->beg);
-
-
 
     ctx.conv0 = NvVideoConverter::createVideoConverter("conv0");
 
@@ -220,7 +237,16 @@ main(int argc, char *argv[])
 
         v4l2_buf.m.planes = planes;
 
-        nvtxRangeId_t rangeId = nvtxRangeStart("Output Plane DQ buffer");
+
+        nvtxEventAttributes_t DQ_OutputPlane = {0};
+        DQ_OutputPlane.version = NVTX_VERSION;
+        DQ_OutputPlane.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+        DQ_OutputPlane.colorType = NVTX_COLOR_ARGB;
+        DQ_OutputPlane.color = 0xFF0000FF;
+        DQ_OutputPlane.messageType = NVTX_MESSAGE_TYPE_ASCII;
+        DQ_OutputPlane.message.ascii = "DeQueue Output Plane";
+
+        nvtxRangeId_t rangeId = nvtxRangeStartEx(&DQ_OutputPlane);
         if (ctx.conv0->output_plane.dqBuffer(v4l2_buf, &buffer, NULL, 100) < 0)
         {
             cerr << "ERROR while DQing buffer at conv0 output plane" << endl;
@@ -229,7 +255,16 @@ main(int argc, char *argv[])
         }
 
         nvtxRangeEnd(rangeId);
-        rangeId = nvtxRangeStart("RD Frame");
+
+        nvtxEventAttributes_t ReadFrame = {0};
+        ReadFrame.version = NVTX_VERSION;
+        ReadFrame.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+        ReadFrame.colorType = NVTX_COLOR_ARGB;
+        ReadFrame.color = 0xFFFF00FF;
+        ReadFrame.messageType = NVTX_MESSAGE_TYPE_ASCII;
+        ReadFrame.message.ascii = "Read Frame";
+
+        rangeId = nvtxRangeStartEx(&ReadFrame);
 
         if (read_video_frame(ctx.in_file, *buffer) < 0)
         {
@@ -241,7 +276,14 @@ main(int argc, char *argv[])
         nvtxRangeEnd(rangeId);
 
         //ctx.begin = std::chrono::high_resolution_clock::now();
-        rangeId = nvtxRangeStart("Output Plane Q buffer");
+        nvtxEventAttributes_t Q_OutputPlane = {0};
+        Q_OutputPlane.version = NVTX_VERSION;
+        Q_OutputPlane.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+        Q_OutputPlane.colorType = NVTX_COLOR_ARGB;
+        Q_OutputPlane.color = 0xFFFFFF00;
+        Q_OutputPlane.messageType = NVTX_MESSAGE_TYPE_ASCII;
+        Q_OutputPlane.message.ascii = "Queue Output plane";
+        rangeId = nvtxRangeStartEx(&Q_OutputPlane);
         ret = ctx.conv0->output_plane.qBuffer(v4l2_buf, NULL);
         if (ret < 0)
         {
@@ -282,9 +324,5 @@ cleanup:
     {
         cout << "App run was successful" << endl;
     }
-
-
-
-
     return -error;
 }
