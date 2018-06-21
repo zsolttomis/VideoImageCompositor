@@ -43,15 +43,7 @@
 #include "include/nvToolsExt.h"
 #include "nvvidconv.h"
 
-#define VTX_PROFILING
-
-#define INPUT_WIDTH 3840
-#define INPUT_HEIGHT 1080
-#define INPUT_PIXFMT V4L2_PIX_FMT_YUV420M
-
-#define OUTPUT_WIDTH 2560
-#define OUTPUT_HEIGHT 720
-#define OUTPUT_PIXFMT V4L2_PIX_FMT_NV12M
+//#define VTX_PROFILING
 
 
 class nvvidconvfs : public nvvidconv {
