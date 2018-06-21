@@ -43,7 +43,7 @@
 #include "include/nvToolsExt.h"
 #include "nvvidconv.h"
 
-//#define VTX_PROFILING
+#define VTX_PROFILING
 
 #define INPUT_WIDTH 3840
 #define INPUT_HEIGHT 1080
@@ -84,7 +84,7 @@ public:
         DQ_CapturePlane.colorType = NVTX_COLOR_ARGB;
         DQ_CapturePlane.color = 0xFF00FFFF;
         DQ_CapturePlane.messageType = NVTX_MESSAGE_TYPE_ASCII;
-        DQ_CapturePlane.message.ascii = "DeQueue Capture plane";
+        DQ_CapturePlane.message.ascii = "Dequeue Capture plane";
 
         DQ_OutputPlane = {0};
         DQ_OutputPlane.version = NVTX_VERSION;
@@ -92,7 +92,7 @@ public:
         DQ_OutputPlane.colorType = NVTX_COLOR_ARGB;
         DQ_OutputPlane.color = 0xFF0000FF;
         DQ_OutputPlane.messageType = NVTX_MESSAGE_TYPE_ASCII;
-        DQ_OutputPlane.message.ascii = "DeQueue Output Plane";
+        DQ_OutputPlane.message.ascii = "Dequeue Output Plane";
 
         ReadFrame = {0};
         ReadFrame.version = NVTX_VERSION;
@@ -117,7 +117,7 @@ public:
         nvvidconvfs * self = static_cast<nvvidconvfs*>(arg);
 
         std::cout << "Frame processing time: " << std::chrono::duration<double, std::micro>{std::chrono::high_resolution_clock::now() - self->begin}.count() << " us" << std::endl;
-        nvtxRangeEnd(self->rangeId);
+        nvtxRangeEnd(self->DQ_CapturePlaneId);
 
         if (!v4l2_buf)
         {
@@ -131,16 +131,15 @@ public:
             return false;
         }
 
-        self->rangeId = nvtxRangeStartEx(&self->WriteFrame);
-
+        self->WriteFrameId = nvtxRangeStartEx(&self->WriteFrame);
         #ifndef VTX_PROFILING
             write_video_frame(self->out_file.get(), *buffer);
         #endif
-        nvtxRangeEnd(self->rangeId);
+        nvtxRangeEnd(self->WriteFrameId);
 
         self->begin = std::chrono::high_resolution_clock::now();
 
-        self->rangeId = nvtxRangeStartEx(&self->Q_CapturePlane);
+        self->Q_CapturePlaneId = nvtxRangeStartEx(&self->Q_CapturePlane);
 
         if (self->conv->capture_plane.qBuffer(*v4l2_buf, buffer) < 0)
         {
@@ -149,9 +148,9 @@ public:
             return false;
         }
 
-        nvtxRangeEnd(self->rangeId);
+        nvtxRangeEnd(self->Q_CapturePlaneId);
 
-        self->rangeId = nvtxRangeStartEx(&self->DQ_CapturePlane);
+        self->DQ_CapturePlaneId = nvtxRangeStartEx(&self->DQ_CapturePlane);
 
         return true;
     }
@@ -161,12 +160,17 @@ public:
 
     // Attributes for NVIDIA tools extensions SDK NVTX for marking ranges  in NVIDIA system profiler
     nvtxEventAttributes_t WriteFrame;
-    nvtxEventAttributes_t Q_CapturePlane;
     nvtxEventAttributes_t DQ_CapturePlane;
+    nvtxEventAttributes_t Q_CapturePlane;
     nvtxEventAttributes_t DQ_OutputPlane;
     nvtxEventAttributes_t ReadFrame;
     nvtxEventAttributes_t Q_OutputPlane;
-    nvtxRangeId_t rangeId;
+    nvtxRangeId_t WriteFrameId;
+    nvtxRangeId_t DQ_CapturePlaneId;
+    nvtxRangeId_t Q_CapturePlaneId;
+    nvtxRangeId_t DQ_OutputPlaneId;
+    nvtxRangeId_t ReadFrameId;
+    nvtxRangeId_t Q_OutputPlaneId;
 
     // Time stamp for measurements
     std::chrono::time_point<std::chrono::high_resolution_clock> begin;
@@ -242,11 +246,11 @@ int main(int argc, char *argv[])
         struct v4l2_plane planes[MAX_PLANES];
         v4l2_buf.m.planes = planes;
 
-        converter.rangeId = nvtxRangeStartEx(&converter.DQ_OutputPlane);
+        converter.DQ_OutputPlaneId = nvtxRangeStartEx(&converter.DQ_OutputPlane);
         NvBuffer *buffer = converter.DequeueOutputPlaneBuffer(v4l2_buf);
-        nvtxRangeEnd(converter.rangeId);
+        nvtxRangeEnd(converter.DQ_OutputPlaneId);
 
-        converter.rangeId = nvtxRangeStartEx(&converter.ReadFrame);
+        converter.ReadFrameId = nvtxRangeStartEx(&converter.ReadFrame);
 
         #ifdef VTX_PROFILING
             if (seek_input_video_frame(converter.in_file.get(), *buffer) < 0)
@@ -258,11 +262,11 @@ int main(int argc, char *argv[])
                 v4l2_buf.m.planes[0].bytesused = 0;
                 eos = true;
             }
-        nvtxRangeEnd(converter.rangeId);
+        nvtxRangeEnd(converter.ReadFrameId);
 
-        converter.rangeId = nvtxRangeStartEx(&converter.Q_OutputPlane);
+        converter.Q_OutputPlaneId = nvtxRangeStartEx(&converter.Q_OutputPlane);
         converter.QueueOutputPlaneBuffer(v4l2_buf);
-        nvtxRangeEnd(converter.rangeId);
+        nvtxRangeEnd(converter.Q_OutputPlaneId);
     }
 
     converter.waitForIdle();
