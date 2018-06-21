@@ -38,6 +38,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <chrono>
+#include <memory>
 
 #include "include/nvToolsExt.h"
 
@@ -49,60 +50,150 @@
 #define OUTPUT_HEIGHT 720
 #define OUTPUT_PIXFMT V4L2_PIX_FMT_NV12M
 
-typedef struct
-{
-    NvVideoConverter *conv0;
-
-    char *in_file_path;
-    std::ifstream * in_file;
-
-    char *out_file_path;
-    std::ofstream * out_file;
-
-    bool got_error;
-
-    std::chrono::time_point<std::chrono::high_resolution_clock> begin;
-    nvtxRangeId_t rangeId;
-
-    uint32_t frameCounter;
-    int length;
-
-} context_t;
+// Attributes for NVIDIA tools extensions SDK NVTX for marking ranges  in NVIDIA system profiler
+nvtxEventAttributes_t WriteFrame = {0};
+nvtxEventAttributes_t Q_CapturePlane = {0};
+nvtxEventAttributes_t DQ_CapturePlane = {0};
+nvtxEventAttributes_t DQ_OutputPlane = {0};
+nvtxEventAttributes_t ReadFrame = {0};
+nvtxEventAttributes_t Q_OutputPlane = {0};
+nvtxRangeId_t rangeId;
 
 
-using namespace std;
 
-static void
-abort(context_t * ctx)
-{
-    ctx->got_error = true;
-    ctx->conv0->abort();
-}
+// Time stamp for measurements
+std::chrono::time_point<std::chrono::high_resolution_clock> begin;
 
-static bool
-conv0_capture_dqbuf_thread_callback(struct v4l2_buffer *v4l2_buf,
-                                   NvBuffer * buffer, NvBuffer * shared_buffer,
-                                   void *arg)
-{
-    context_t *ctx = (context_t *) arg;
-
-    nvtxRangeEnd(ctx->rangeId);
-    std::cout << ++ctx->frameCounter << ": "<<  std::chrono::duration<double, std::micro>{std::chrono::high_resolution_clock::now() - ctx->begin}.count() << " us" << std::endl;
-
-    if (!v4l2_buf)
+class nvvidconv {
+public:
+    nvvidconv(uint32_t inputWidth_, uint32_t inputHeight_, uint32_t inputFMT_, uint32_t outputWidth_, uint32_t outputHeight_, uint32_t outputFMT_) :
+    conv(NvVideoConverter::createVideoConverter("conv")), inputWidth(inputWidth_), inputHeight(inputHeight_), inputFMT(inputFMT_), outputWidth(outputWidth_), outputHeight(outputHeight_), outputFMT(outputFMT_), inError(false)
     {
-        cerr << "Failed to dequeue buffer from conv0 capture plane" << endl;
-        abort(ctx);
-        return false;
+        if(conv)
+        {
+            conv->setOutputPlaneFormat(inputFMT_, inputWidth, inputHeight, V4L2_NV_BUFFER_LAYOUT_PITCH);
+            conv->setCapturePlaneFormat(outputFMT_, outputWidth_, outputHeight_, V4L2_NV_BUFFER_LAYOUT_PITCH);
+            conv->output_plane.setupPlane(V4L2_MEMORY_MMAP, 10, true, false);
+            conv->capture_plane.setupPlane(V4L2_MEMORY_MMAP, 10, true, false);
+            conv->output_plane.setStreamStatus(true);
+            conv->capture_plane.setStreamStatus(true);
+            conv->capture_plane.setDQThreadCallback(DequeueCapturePlaneBufferCallback);
+            conv->capture_plane.startDQThread(this);
+
+            in_file = std::make_unique<std::ifstream>("in");
+            out_file = std::make_unique<std::ofstream>("out");
+        }
     }
 
-    if (v4l2_buf->m.planes[0].bytesused == 0)
+    void abort()
     {
-        return false;
+        inError = true;
+        conv->abort();
     }
 
-    nvtxEventAttributes_t WriteFrame = {0};
+    uint32_t getNumberOfCapturePlaneBuffers(){
+        return conv->capture_plane.getNumBuffers();
+    }
 
+    uint32_t getNumberOfOutputPlaneBuffers(){
+        return conv->output_plane.getNumBuffers();
+    }
+
+    NvBuffer* getOutputPlaneBuffer(uint32_t buffNum){
+        return conv->output_plane.getNthBuffer(buffNum);
+    }
+
+    void QueueCapturePlaneBuffer(struct v4l2_buffer &v4l2_buf){
+        int ret = conv->capture_plane.qBuffer(v4l2_buf, NULL);
+        if (ret < 0)
+        {
+            std::cerr << "Error while queueing buffer capture plane" << std::endl;
+            abort();
+        }
+    }
+
+    void QueueOutputPlaneBuffer(struct v4l2_buffer &v4l2_buf){
+        int ret = conv->output_plane.qBuffer(v4l2_buf, NULL);
+        if (ret < 0)
+        {
+            std::cerr << "Error while queueing buffer output plane" << std::endl;
+            abort();
+        }
+    }
+
+    NvBuffer* DequeueOutputPlaneBuffer(struct v4l2_buffer &v4l2_buf){
+        NvBuffer *buffer;
+        if (conv->output_plane.dqBuffer(v4l2_buf, &buffer, NULL, 100) < 0)
+        {
+            std::cerr << "ERROR while DQing buffer at conv output plane" << std::endl;
+            abort();
+        }
+        return buffer;
+    }
+
+    bool isInError(){
+        return (inError || conv->isInError());
+    }
+
+    static bool DequeueCapturePlaneBufferCallback(struct v4l2_buffer *v4l2_buf, NvBuffer * buffer, NvBuffer * shared_buffer, void *arg)
+    {
+        nvvidconv * self = static_cast<nvvidconv*>(arg);
+       nvtxRangeEnd(rangeId);
+
+        if (!v4l2_buf)
+        {
+            std::cerr << "Failed to dequeue buffer from conv capture plane" << std::endl;
+            self->abort();
+            return false;
+        }
+
+        if (v4l2_buf->m.planes[0].bytesused == 0)
+        {
+            return false;
+        }
+
+        rangeId = nvtxRangeStartEx(&WriteFrame);
+
+        write_video_frame(self->out_file.get(), *buffer);
+        nvtxRangeEnd(rangeId);
+
+        begin = std::chrono::high_resolution_clock::now();
+
+        rangeId = nvtxRangeStartEx(&Q_CapturePlane);
+
+        if (self->conv->capture_plane.qBuffer(*v4l2_buf, buffer) < 0)
+        {
+            std::cerr << "Error queueing buffer on conv0 capture plane" << std::endl;
+            self->abort();
+            return false;
+        }
+
+        nvtxRangeEnd(rangeId);
+
+        rangeId = nvtxRangeStartEx(&DQ_CapturePlane);
+
+        return true;
+    }
+
+        const std::unique_ptr<NvVideoConverter> conv;
+    std::unique_ptr<std::ifstream> in_file;
+    std::unique_ptr<std::ofstream> out_file;
+
+private:
+
+    uint32_t inputWidth;
+    uint32_t inputHeight;
+    uint32_t inputFMT;
+    uint32_t outputWidth;
+    uint32_t outputHeight;
+    uint32_t outputFMT;
+    bool inError;
+};
+
+
+int main(int argc, char *argv[])
+{
+    // Attributes for NVIDIA tools extensions SDK NVTX for marking ranges  in NVIDIA system profiler
     WriteFrame.version = NVTX_VERSION;
     WriteFrame.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
     WriteFrame.colorType = NVTX_COLOR_ARGB;
@@ -110,14 +201,6 @@ conv0_capture_dqbuf_thread_callback(struct v4l2_buffer *v4l2_buf,
     WriteFrame.messageType = NVTX_MESSAGE_TYPE_ASCII;
     WriteFrame.message.ascii = "Write Frame";
 
-    nvtxRangeId_t rangeId = nvtxRangeStartEx(&WriteFrame);
-
-    write_video_frame(ctx->out_file, *buffer);
-    nvtxRangeEnd(rangeId);
-
-    ctx->begin = std::chrono::high_resolution_clock::now();
-
-    nvtxEventAttributes_t Q_CapturePlane = {0};
     Q_CapturePlane.version = NVTX_VERSION;
     Q_CapturePlane.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
     Q_CapturePlane.colorType = NVTX_COLOR_ARGB;
@@ -125,18 +208,6 @@ conv0_capture_dqbuf_thread_callback(struct v4l2_buffer *v4l2_buf,
     Q_CapturePlane.messageType = NVTX_MESSAGE_TYPE_ASCII;
     Q_CapturePlane.message.ascii = "Queue Capture plane";
 
-    rangeId = nvtxRangeStartEx(&Q_CapturePlane);
-
-    if (ctx->conv0->capture_plane.qBuffer(*v4l2_buf, buffer) < 0)
-    {
-        cerr << "Error queueing buffer on conv0 capture plane" << endl;
-        abort(ctx);
-        return false;
-    }
-
-    nvtxRangeEnd(rangeId);
-
-    nvtxEventAttributes_t DQ_CapturePlane = {0};
     DQ_CapturePlane.version = NVTX_VERSION;
     DQ_CapturePlane.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
     DQ_CapturePlane.colorType = NVTX_COLOR_ARGB;
@@ -144,47 +215,34 @@ conv0_capture_dqbuf_thread_callback(struct v4l2_buffer *v4l2_buf,
     DQ_CapturePlane.messageType = NVTX_MESSAGE_TYPE_ASCII;
     DQ_CapturePlane.message.ascii = "DeQueue Capture plane";
 
-    ctx->rangeId = nvtxRangeStartEx(&DQ_CapturePlane);
+    DQ_OutputPlane.version = NVTX_VERSION;
+    DQ_OutputPlane.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+    DQ_OutputPlane.colorType = NVTX_COLOR_ARGB;
+    DQ_OutputPlane.color = 0xFF0000FF;
+    DQ_OutputPlane.messageType = NVTX_MESSAGE_TYPE_ASCII;
+    DQ_OutputPlane.message.ascii = "DeQueue Output Plane";
 
-    return true;
-}
+    ReadFrame.version = NVTX_VERSION;
+    ReadFrame.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+    ReadFrame.colorType = NVTX_COLOR_ARGB;
+    ReadFrame.color = 0xFFFF00FF;
+    ReadFrame.messageType = NVTX_MESSAGE_TYPE_ASCII;
+    ReadFrame.message.ascii = "Read Frame";
 
-int main(int argc, char *argv[])
-{
-    context_t ctx;
-    NvVideoConverter *main_conv;
-    int ret = 0;
-    int error = 0;
+    Q_OutputPlane.version = NVTX_VERSION;
+    Q_OutputPlane.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+    Q_OutputPlane.colorType = NVTX_COLOR_ARGB;
+    Q_OutputPlane.color = 0xFFFFFF00;
+    Q_OutputPlane.messageType = NVTX_MESSAGE_TYPE_ASCII;
+    Q_OutputPlane.message.ascii = "Queue Output plane";
+
     bool eos = false;
 
-    ctx.frameCounter = 0;
 
-    ctx.in_file = new ifstream("in");
-
-    ctx.out_file = new ofstream("out");
-
-    ctx.conv0 = NvVideoConverter::createVideoConverter("conv0");
-
-    main_conv = ctx.conv0;
-
-    ret = ctx.conv0->setOutputPlaneFormat(INPUT_PIXFMT, INPUT_WIDTH, INPUT_HEIGHT, V4L2_NV_BUFFER_LAYOUT_PITCH);
-
-    ret = ctx.conv0->setCapturePlaneFormat(OUTPUT_PIXFMT, OUTPUT_WIDTH, OUTPUT_HEIGHT, V4L2_NV_BUFFER_LAYOUT_PITCH);
-
-    ret = ctx.conv0->output_plane.setupPlane(V4L2_MEMORY_MMAP, 10, true, false);
-
-    ret = ctx.conv0->capture_plane.setupPlane(V4L2_MEMORY_MMAP, 10, true, false);
-
-    ret = ctx.conv0->output_plane.setStreamStatus(true);
-
-    ret = ctx.conv0->capture_plane.setStreamStatus(true);
-
-    ctx.conv0->capture_plane.setDQThreadCallback(conv0_capture_dqbuf_thread_callback);
-
-    ctx.conv0->capture_plane.startDQThread(&ctx);
+    nvvidconv converter(INPUT_WIDTH, INPUT_HEIGHT, INPUT_PIXFMT, OUTPUT_WIDTH, OUTPUT_HEIGHT, OUTPUT_PIXFMT);
 
     // Enqueue all empty conv0 capture plane buffers
-    for (uint32_t i = 0; i < ctx.conv0->capture_plane.getNumBuffers(); i++)
+    for (uint32_t i = 0; i < converter.getNumberOfCapturePlaneBuffers(); ++i)
     {
         struct v4l2_buffer v4l2_buf;
         struct v4l2_plane planes[MAX_PLANES];
@@ -192,137 +250,127 @@ int main(int argc, char *argv[])
         v4l2_buf.index = i;
         v4l2_buf.m.planes = planes;
 
-        ret = ctx.conv0->capture_plane.qBuffer(v4l2_buf, NULL);
-        if (ret < 0)
-        {
-            cerr << "Error while queueing buffer at conv0 capture plane" << endl;
-            abort(&ctx);
-            goto cleanup;
-        }
+        converter.QueueCapturePlaneBuffer(v4l2_buf);
     }
 
     // Read video frame from file and queue buffer on conv0 output plane
-    for (uint32_t i = 0; i < ctx.conv0->output_plane.getNumBuffers() && !ctx.got_error && !eos; i++)
+    for (uint32_t i = 0; i < converter.getNumberOfOutputPlaneBuffers() && !converter.isInError() && !eos; i++)
     {
         struct v4l2_buffer v4l2_buf;
         struct v4l2_plane planes[MAX_PLANES];
-        NvBuffer *buffer = ctx.conv0->output_plane.getNthBuffer(i);
-
         v4l2_buf.index = i;
         v4l2_buf.m.planes = planes;
 
-        if (read_video_frame(ctx.in_file, *buffer) < 0)
+        NvBuffer* buffer = converter.getOutputPlaneBuffer(i);
+
+        if (read_video_frame(converter.in_file.get(), *buffer) < 0)
         {
-            cerr << "Could not read complete frame from input file" << endl;
-            cerr << "File read complete." << endl;
+            std::cerr << "Could not read complete frame from input file" << std::endl;
             v4l2_buf.m.planes[0].bytesused = 0;
             eos = true;
         }
 
-        ret = ctx.conv0->output_plane.qBuffer(v4l2_buf, NULL);
-        if (ret < 0)
-        {
-            cerr << "Error while queueing buffer at conv0 output plane" << endl;
-            abort(&ctx);
-            goto cleanup;
-        }
+        converter.QueueOutputPlaneBuffer(v4l2_buf);
     }
 
+    uint32_t count =0;
+
     // Read video frame from file till EOS is reached and queue buffer on conv0 output plane
-    while (!ctx.got_error && !ctx.conv0->isInError() && !eos)
+    while (!converter.isInError() && !eos)
     {
+        std::cout << count++ << std::endl;
         struct v4l2_buffer v4l2_buf;
         struct v4l2_plane planes[MAX_PLANES];
-        NvBuffer *buffer;
-
         v4l2_buf.m.planes = planes;
 
-
-        nvtxEventAttributes_t DQ_OutputPlane = {0};
-        DQ_OutputPlane.version = NVTX_VERSION;
-        DQ_OutputPlane.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
-        DQ_OutputPlane.colorType = NVTX_COLOR_ARGB;
-        DQ_OutputPlane.color = 0xFF0000FF;
-        DQ_OutputPlane.messageType = NVTX_MESSAGE_TYPE_ASCII;
-        DQ_OutputPlane.message.ascii = "DeQueue Output Plane";
-
-        nvtxRangeId_t rangeId = nvtxRangeStartEx(&DQ_OutputPlane);
-        if (ctx.conv0->output_plane.dqBuffer(v4l2_buf, &buffer, NULL, 100) < 0)
-        {
-            cerr << "ERROR while DQing buffer at conv0 output plane" << endl;
-            abort(&ctx);
-            goto cleanup;
-        }
-
+        rangeId = nvtxRangeStartEx(&DQ_OutputPlane);
+        NvBuffer *buffer = converter.DequeueOutputPlaneBuffer(v4l2_buf);
         nvtxRangeEnd(rangeId);
-
-        nvtxEventAttributes_t ReadFrame = {0};
-        ReadFrame.version = NVTX_VERSION;
-        ReadFrame.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
-        ReadFrame.colorType = NVTX_COLOR_ARGB;
-        ReadFrame.color = 0xFFFF00FF;
-        ReadFrame.messageType = NVTX_MESSAGE_TYPE_ASCII;
-        ReadFrame.message.ascii = "Read Frame";
 
         rangeId = nvtxRangeStartEx(&ReadFrame);
 
-        if (read_video_frame(ctx.in_file, *buffer) < 0)
+        if (read_video_frame(converter.in_file.get(), *buffer) < 0)
         {
-            cerr << "Could not read complete frame from input file" << endl;
-            cerr << "File read complete." << endl;
+            std::cerr << "Could not read complete frame from input file" << std::endl;
             v4l2_buf.m.planes[0].bytesused = 0;
             eos = true;
         }
         nvtxRangeEnd(rangeId);
 
-        //ctx.begin = std::chrono::high_resolution_clock::now();
-        nvtxEventAttributes_t Q_OutputPlane = {0};
-        Q_OutputPlane.version = NVTX_VERSION;
-        Q_OutputPlane.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
-        Q_OutputPlane.colorType = NVTX_COLOR_ARGB;
-        Q_OutputPlane.color = 0xFFFFFF00;
-        Q_OutputPlane.messageType = NVTX_MESSAGE_TYPE_ASCII;
-        Q_OutputPlane.message.ascii = "Queue Output plane";
         rangeId = nvtxRangeStartEx(&Q_OutputPlane);
-        ret = ctx.conv0->output_plane.qBuffer(v4l2_buf, NULL);
-        if (ret < 0)
-        {
-            cerr << "Error while queueing buffer at conv0 output plane" << endl;
-            abort(&ctx);
-            goto cleanup;
-        }
+        converter.QueueOutputPlaneBuffer(v4l2_buf);
         nvtxRangeEnd(rangeId);
     }
 
-    if (!ctx.got_error)
+    if (!converter.isInError())
     {
         // Wait till all capture plane buffers on conv0 and conv1 are dequeued
-        ctx.conv0->waitForIdle(-1);
+        converter.conv->waitForIdle(-1);
     }
 
-cleanup:
-    if (ctx.conv0 && ctx.conv0->isInError())
-    {
-        cerr << "VideoConverter0 is in error" << endl;
-        error = 1;
-    }
 
-    if (ctx.got_error)
-    {
-        error = 1;
-    }
-
-    delete ctx.in_file;
-    delete ctx.out_file;
-    delete ctx.conv0;
-
-    if (error)
-    {
-        cout << "App run failed" << endl;
-    }
-    else
-    {
-        cout << "App run was successful" << endl;
-    }
-    return -error;
+    converter.isInError() ? std::cout << "App run failed" << std::endl : std::cout << "App run was successful" << std::endl;
+    return 0;
 }
+
+
+/*
+#include "NvUtils.h"
+#include "NvBuffer.h"
+#include "NvLogging.h"
+#include <fstream>
+
+int
+read_video_frame(std::ifstream * stream, NvBuffer & buffer)
+{
+    uint32_t i, j;
+    char *data;
+
+    for (i = 0; i < buffer.n_planes; i++)
+    {
+        NvBuffer::NvBufferPlane &plane = buffer.planes[i];
+        std::streamsize bytes_to_read =
+            plane.fmt.bytesperpixel * plane.fmt.width;
+        data = (char *) plane.data;
+        plane.bytesused = 0;
+        stream->seekg(bytes_to_read*plane.fmt.height ,std::ios::cur);
+        if(stream->peek() ==EOF){
+            return -1;
+        }
+        //for (j = 0; j < plane.fmt.height; j++)
+        //{
+        //    stream->read(data, bytes_to_read);
+        //    if (stream->gcount() < bytes_to_read)
+        //        return -1;
+        //    data += plane.fmt.stride;
+        //}
+        plane.bytesused = plane.fmt.stride * plane.fmt.height;
+    }
+    return 0;
+}
+
+int
+write_video_frame(std::ofstream * stream, NvBuffer &buffer)
+{
+    uint32_t i, j;
+    char *data;
+
+    for (i = 0; i < buffer.n_planes; i++)
+    {
+        NvBuffer::NvBufferPlane &plane = buffer.planes[i];
+        size_t bytes_to_write =
+            plane.fmt.bytesperpixel * plane.fmt.width;
+
+        data = (char *) plane.data;
+        for (j = 0; j < plane.fmt.height; j++)
+        {
+            //stream->write(data, bytes_to_write);
+            //if (!stream->good())
+            //    return -1;
+            data += plane.fmt.stride;
+        }
+    }
+    return 0;
+}
+
+*/

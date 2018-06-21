@@ -31,7 +31,7 @@
 include ../Rules.mk
 
 APP := video_convert
-CPPFLAGS += -std=c++11 -fno-omit-frame-pointer -funwind-tables -g -lnvToolsExt -pthread -ldl -lrt -I/usr/local/cuda-8.0/targets/aarch64-linux/include/ -I/home/nvidia/
+CPPFLAGS += -std=c++14 -fno-omit-frame-pointer -funwind-tables -g -lnvToolsExt -pthread -ldl -lrt -I/usr/local/cuda-8.0/targets/aarch64-linux/include/ -I/home/nvidia/
 
 SRCS := \
 	main.cpp \
